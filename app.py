@@ -1,47 +1,128 @@
 # app_streamlit.py
 # Dashboard AI Prediksi Dropout & Rekomendasi Jalur Pendidikan
-# Install dulu: pip install streamlit pandas numpy scikit-learn matplotlib seaborn openpyxl
+# Install package: pip install streamlit pandas numpy scikit-learn matplotlib seaborn openpyxl
 
-from importlib.metadata import version 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import os
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report
-
-st.set_page_config(page_title="Dashboard AI Pendidikan", layout="wide")
 
 # ---------------------------------------------------
-# PREPROCESS DATA
+# KONFIGURASI HALAMAN
+# ---------------------------------------------------
+st.set_page_config(page_title="Dashboard AI Pendidikan", layout="wide")
+st.title("📊 Dashboard AI Pendidikan - Prediksi Dropout & Jalur Penempatan")
+
+# ---------------------------------------------------
+# INFORMASI KOMPONEN DATA YANG HARUS ADA
+# ---------------------------------------------------
+("Pastikan file **data.csv** memiliki kolom berikut: NO , RT,RW, Kecamatan, Nama Posyandu, Kelurahan, Nama Anak Lenkap Sesuai Dokumen, Jenis kelamin Anak, Tempat Lahir Anak, Tanggal Lahir Anak, Nama Orang tua/wali, Alamat Lengap, Keterangan Tambahan, Nomor hp/WA, Alasan Tidak Sekolah, Pendidikan Terakhir(harus ada angkanya contoh 2), Status Domisili, Keterangan Tambahan (Misalnya: Sudah Bekerja,Status Siswa(putus, aktif, lulus), Tunggakan, Ingin Sekolah Lagi, Sedang Ikut Paket A/B/C, dll). ")
+
+("unutk mengambil haslinya  copy saja datanya  paste"
+" ke excel, jika ada data yang kosong masi tetap  bisa di proses. sebelum itu utk mengexstrak data nya jika excel uah dulu ke csv(comma delimited).")  
+   
+
+# ---------------------------------------------------
+# FUNGSI BACA CSV DENGAN PERLINDUNGAN
+# ---------------------------------------------------
+def load_csv(uploaded):
+    try:
+        return pd.read_csv(uploaded, encoding="utf-8", sep=",", quotechar='"', on_bad_lines="skip")
+    except:
+        uploaded.seek(0)
+        return pd.read_csv(uploaded, encoding="latin1", sep=";", quotechar='"', on_bad_lines="skip")
+
+# ---------------------------------------------------
+# PREPROCESS DATA POSYANDU (REVISI)
 # ---------------------------------------------------
 def preprocess(df):
-    required = ["nama","tgl_lahir","tgl_masuk_sd","kelas_terakhir","status",
-                "tunggakan","pendapatan_keluarga","alasan_putus","sekolah_asal_tipe","alamat_kecamatan"]
-    for col in required:
-        if col not in df.columns:
-            df[col] = np.nan
+    # Mapping nama kolom
+    mapping = {
+        "Nama Anak Lengkap Sesuai Dokumen": "nama",
+        "Tanggal Lahir Anak": "tgl_lahir",
+        "Pendidikan Terakhir": "kelas_terakhir",
+        "Alasan Tidak Sekolah": "alasan_putus",
+        "Kecamatan": "alamat_kecamatan",
+        "Tunggakan": "tunggakan",
+        "Status Siswa": "status"  # pastikan jika ada kolom ini, langsung dipakai
+    }
+    df = df.rename(columns=mapping)
 
+    # ---- Konversi kolom tunggakan ke angka
+    if "tunggakan" not in df.columns:
+        df["tunggakan"] = 0
+    else:
+        df["tunggakan"] = (
+            df["tunggakan"]
+            .astype(str)
+            .str.replace(r"[^\d]", "", regex=True)
+            .replace("", "0")
+            .astype(float)
+        )
+
+    # ---- Pastikan status terbaca dengan benar
+    if "status" in df.columns:
+        # Jika ada kolom status, pakai langsung & normalisasi
+        df["status"] = (
+            df["status"]
+            .fillna("aktif")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+        )
+        # Normalisasi supaya seragam
+        df["status"] = df["status"].replace({
+            "putus sekolah": "putus",
+            "drop out": "putus",
+            "berhenti": "putus",
+            "aktif sekolah": "aktif",
+            "masih sekolah": "aktif",
+            "lulus sekolah": "lulus",
+            "kelulusan": "lulus"
+        })
+    else:
+        # Kalau kolom status tidak ada → tentukan otomatis
+        def tentukan_status(row):
+            alasan = str(row["alasan_putus"]).strip().lower()
+            if alasan == "" or alasan == "nan":
+                return "aktif"
+            elif "lulus" in alasan:
+                return "lulus"
+            elif "putus" in alasan or "masalah" in alasan:
+                return "putus"
+            return "aktif"
+
+        df["status"] = df.apply(tentukan_status, axis=1)
+
+    # ---- Hitung usia dari tanggal lahir
     df["tgl_lahir"] = pd.to_datetime(df["tgl_lahir"], errors="coerce")
-    df["tgl_masuk_sd"] = pd.to_datetime(df["tgl_masuk_sd"], errors="coerce")
     df["usia"] = ((pd.Timestamp.now() - df["tgl_lahir"]).dt.days / 365).round(1)
-    df["usia_masuk_sd"] = ((df["tgl_masuk_sd"] - df["tgl_lahir"]).dt.days / 365).round(1)
 
-    df["tunggakan"] = pd.to_numeric(df["tunggakan"], errors="coerce").fillna(0)
-    df["pendapatan_keluarga"] = pd.to_numeric(df["pendapatan_keluarga"], errors="coerce").fillna(0)
+    # ---- Konversi kelas terakhir → angka
+    def convert_kelas(kelas):
+        if pd.isna(kelas):
+            return np.nan
+        kelas = str(kelas).strip().upper()
+        for i in range(1, 13):
+            if str(i) in kelas:
+                return i
+        if "XII" in kelas: return 12
+        if "XI" in kelas: return 11
+        if "X" in kelas: return 10
+        return np.nan
 
-    df["kategori_tunggakan"] = pd.cut(df["tunggakan"],
-                                      bins=[-1, 0, 500000, 2000000, np.inf],
-                                      labels=["Lunas","Ringan","Sedang","Tinggi"])
+    df["kelas_terakhir"] = df["kelas_terakhir"].apply(convert_kelas)
 
-    df["alasan_putus_norm"] = df["alasan_putus"].fillna("").astype(str).str.strip().str.lower()
+    # ---- Normalisasi alasan putus
+    df["alasan_putus_norm"] = df["alasan_putus"].fillna("").astype(str).str.lower()
 
     def map_alasan(txt):
         if "ekonomi" in txt or "uang" in txt or "biaya" in txt:
             return "Ekonomi"
+        elif "ijazah" in txt or "tunggakan" in txt:
+            return "Ijazah/Tunggakan"
         elif "pindah" in txt:
             return "Pindah Orang Tua"
         elif "minat" in txt or "malas" in txt or "bosan" in txt:
@@ -56,160 +137,133 @@ def preprocess(df):
             return "Jarak Sekolah"
         else:
             return "Lainnya"
+
     df["alasan_kategori"] = df["alasan_putus_norm"].apply(map_alasan)
-    df["label_dropout"] = np.where(df["status"].astype(str).str.lower()=="putus", 1, 0)
+
+    # ---- Label dropout untuk statistik
+    df["label_dropout"] = np.where(df["status"] == "putus", 1, 0)
     return df
 
 # ---------------------------------------------------
-# FUNGSI REKOMENDASI JALUR PENDIDIKAN - VERSI FINAL TERBAIK
+# FUNGSI REKOMENDASI JALUR PENDIDIKAN (REVISI)
 # ---------------------------------------------------
 def rekomendasi_penempatan(row):
-    usia = row["usia"]
-    kelas = row["kelas_terakhir"]
-    status = str(row["status"]).lower()
-    alasan = row["alasan_kategori"]
+    usia = row.get("usia", np.nan)
+    kelas = row.get("kelas_terakhir", np.nan)
+    status = str(row.get("status", "")).lower()
+    alasan = row.get("alasan_kategori", "")
+    tunggakan = row.get("tunggakan")
 
-    # Jika data penting kosong
-    if pd.isna(usia) or pd.isna(kelas):
-        return "⚠️ Data belum lengkap, mohon lengkapi tanggal lahir & kelas terakhir"
+    if pd.isna(usia) and pd.isna(kelas):
+        return "⚠️ Data kurang lengkap"
 
     try:
         kelas = int(kelas)
     except:
-        return "⚠️ Data kelas tidak valid, perbaiki data siswa"
+        kelas = np.nan
 
-    # Batas usia ideal per kelas SD (Kemendikbud)
     batas_usia_kelas = {1: 7, 2: 8, 3: 9, 4: 10, 5: 11, 6: 12}
 
-    # =======================
-    # 1. SISWA MASIH AKTIF
-    # =======================
+    # STATUS AKTIF → lanjut sekolah
     if status == "aktif":
-        if kelas in batas_usia_kelas:
-            usia_normal = batas_usia_kelas[kelas]
+        if not pd.isna(kelas):
+            usia_normal = batas_usia_kelas.get(kelas, 12)
             if usia > usia_normal + 2:
-                return "📌 Direkomendasikan Paket A (Usia melebihi batas wajar untuk SD)"
-            else:
-                return "✅ Tetap di Sekolah Reguler"
-        return "⚠️ Kelas tidak valid, periksa data siswa"
+                return "📌 Direkomendasikan Paket A (Usia lebih dari standar SD)"
+            return "✅ Tetap di Sekolah Reguler"
+        return "✅ Tetap sekolah, kelas tidak terdeteksi"
 
-    # =======================
-    # 2. SISWA SUDAH LULUS SD
-    # =======================
+    # STATUS LULUS → lanjut ke jenjang berikutnya
     if status == "lulus":
         if kelas == 6:
-            if usia <= 15:
-                return "🎓 Lanjut ke SMP Reguler"
-            else:
-                return "📌 Direkomendasikan Paket B (Setara SMP, karena usia di atas standar)"
-        return "⚠️ Data lulus tidak konsisten, periksa kelas terakhir"
+            return "🎓 Lanjut ke SMP Reguler"
+        elif kelas >= 9:
+            return "🎓 Lanjut ke SMA/SMK"
+        return "⚠️ Perlu cek data kelulusan"
 
-    # =======================
-    # 3. SISWA PUTUS SEKOLAH
-    # =======================
+    # STATUS PUTUS SEKOLAH
     if status == "putus":
-        # Jika usia masih cukup muda untuk lanjut sekolah reguler
-        if usia <= 12 and kelas <= 5:
-            return "🎯 Rekomendasi Sekolah Terdekat (Masih cukup usia untuk lanjut SD)"
-
-        # Jika sudah tamat SD tapi putus saat mau lanjut SMP
-        if kelas == 6 and usia <= 15:
-            return "🎯 Rekomendasi Lanjut SMP Reguler"
-
-        # Putus karena alasan ekonomi → tawarkan Paket A
+        # Kasus EKONOMI → pertimbangkan usia + kelas + tunggakan
         if alasan == "Ekonomi":
-            return "📌 Direkomendasikan Paket A (Gratis, setara SD)"
+            if kelas <= 5 and usia <= 12:
+                return "🎯 Lanjut SD Reguler (Bantuan Program Ekonomi)"
+            if kelas == 6:
+                if usia <= 15:
+                    if tunggakan > 0:
+                        return "🎯 Lanjut SMP Reguler (Setelah melunasi tunggakan)"
+                    else:
+                        return "🎯 Lanjut SMP Reguler (Layak tanpa tunggakan)"
+                else:
+                    return "📌 Paket B (Setara SMP, usia di atas standar)"
+            if kelas <= 5 and usia >= 13:
+                return "📌 Paket A (Setara SD, usia di atas standar)"
+            return "👨‍🏫 Program Kejar Paket A/B sesuai kondisi"
 
-        # Putus karena pindah orang tua
-        elif alasan == "Pindah Orang Tua":
-            return "🏫 Daftar ke Sekolah Terdekat sesuai domisili baru"
+        # Kasus IJAZAH/TUNGGAKAN → boleh lanjut SMP jika syaratnya terpenuhi
+        if alasan == "Ijazah/Tunggakan":
+            if kelas == 6 and usia <= 15:
+                return "🎯 Lanjut SMP Reguler (Setelah melunasi tunggakan/ijazah)"
+            elif kelas == 6 and usia > 15:
+                return "📌 Paket B (Setara SMP, usia di atas standar)"
+            else:
+                return "📌 Paket A (Setara SD)"
 
-        # Putus karena minat rendah / pergaulan buruk
-        elif alasan in ["Minat Rendah", "Pergaulan Buruk"]:
-            return "👨‍🏫 Program Bimbingan Konseling & Kejar Paket A"
-
-        # Putus karena jarak sekolah terlalu jauh
-        elif alasan == "Jarak Sekolah":
-            return "🏫 Direkomendasikan Sekolah Terdekat"
-
-        # Putus karena kesehatan
-        elif alasan == "Kesehatan":
-            return "🏥 Sekolah Inklusi / Program Pendidikan Khusus"
-
-        # Jika kelas 2-6 tetapi usia ≥ 13 tahun → Paket A
-        if kelas in [2, 3, 4, 5, 6] and usia >= 13:
-            return "📌 Direkomendasikan Paket A (Karena usia 13 tahun ke atas)"
-
-        # Jika usia sangat tinggi (≥15) dan belum tamat SD → Paket A
-        if usia >= 15 and kelas <= 6:
-            return "📌 Direkomendasikan Paket A (Usia jauh di atas standar SD)"
-
-        # Jika putus setelah lulus SD dan usia ≥15 → Paket B
+        # Kasus lainnya → logika default
+        if kelas <= 5 and usia <= 12:
+            return "🎯 Lanjut SD Reguler"
+        if kelas <= 6 and usia >= 13:
+            return "📌 Paket A (Usia di atas standar SD)"
         if kelas == 6 and usia >= 15:
-            return "📌 Direkomendasikan Paket B (Setara SMP)"
+            return "📌 Paket B (Setara SMP)"
+        return "👨‍🏫 Program Kejar Paket A/B sesuai usia"
 
-        # Jika tidak memenuhi kondisi lain
-        return "⚠️ Jalur pendidikan tidak terdefinisi, perlu cek data siswa"
-
-    # =======================
-    # 4. STATUS TIDAK JELAS
-    # =======================
-    return "⚠️ Status siswa tidak jelas, periksa kembali data"
-
+    return "⚠️ Status siswa tidak jelas"
 
 # ---------------------------------------------------
 # STREAMLIT DASHBOARD
 # ---------------------------------------------------
-st.title("📊 Dashboard AI Pendidikan - Prediksi Dropout & Jalur Penempatan")
-st.markdown("""
-### Upload CSV dengan format berikut:
-**nama, tgl_lahir, tgl_masuk_sd, kelas_terakhir, status, tunggakan, pendapatan_keluarga, alasan_putus, sekolah_asal_tipe, alamat_kecamatan**
-""")
-
-uploaded = st.file_uploader("Upload data_siswa.csv", type=["csv"])
+uploaded = st.file_uploader("📂 Upload data.csv", type=["csv"])
 sample_btn = st.button("Gunakan Data Contoh")
 df = None
 
 if uploaded:
-    df = pd.read_csv(uploaded)
-elif sample_btn and os.path.exists("data_siswa.csv"):
-    df = pd.read_csv("data_siswa.csv")
+    df = load_csv(uploaded)
+elif sample_btn and os.path.exists("data_posyandu.csv"):
+    df = load_csv("data_posyandu.csv")
 
 if df is not None:
     dfp = preprocess(df.copy())
     dfp["rekomendasi_penempatan"] = dfp.apply(rekomendasi_penempatan, axis=1)
 
-    st.subheader("🔍 Preview Data")
-    st.dataframe(dfp.head(10))
-
-    # Statistik
-    st.subheader("📈 Statistik Umum")
+    # Statistik umum
+    st.subheader("📈 Statistik Umum Siswa")
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Total Siswa", len(dfp))
     with col2:
-        st.metric("Total Putus", int(dfp["label_dropout"].sum()))
+        st.metric("Total Putus Sekolah", int(dfp["label_dropout"].sum()))
     with col3:
         st.metric("Total Tunggakan", f"Rp {int(dfp['tunggakan'].sum()):,}")
 
-    # Visualisasi: Pie Chart Status
+    # Distribusi status
     st.subheader("🟢 Distribusi Status Siswa")
     fig1, ax1 = plt.subplots()
     dfp["status"].value_counts().plot.pie(autopct="%1.1f%%", ax=ax1, cmap="coolwarm")
     ax1.set_ylabel("")
     st.pyplot(fig1)
 
-    # Visualisasi: Bar Chart Jalur Rekomendasi
+    # Distribusi rekomendasi
     st.subheader("📌 Distribusi Jalur Pendidikan Rekomendasi")
-    fig2, ax2 = plt.subplots(figsize=(8,5))
+    fig2, ax2 = plt.subplots(figsize=(10, 5))
     sns.countplot(x="rekomendasi_penempatan", data=dfp, palette="Set2", ax=ax2)
-    ax2.set_xticklabels(ax2.get_xticklabels(), rotation=45)
+    ax2.set_xticklabels(ax2.get_xticklabels(), rotation=45, ha="right")
     st.pyplot(fig2)
 
-    # Data rekomendasi
+    # Tabel detail rekomendasi
     st.subheader("📌 Rekomendasi Penempatan Detail")
-    st.dataframe(dfp[["nama","usia","kelas_terakhir","status","alasan_kategori","rekomendasi_penempatan"]])
+    st.dataframe(dfp[["nama", "usia", "kelas_terakhir", "status", "alasan_kategori", "tunggakan", "rekomendasi_penempatan"]],
+                 use_container_width=True, height=600)
 
-    # Download hasil rekomendasi
+    # Tombol download hasil rekomendasi
     csv = dfp.to_csv(index=False).encode("utf-8")
     st.download_button("💾 Download Hasil Rekomendasi", data=csv, file_name="rekomendasi_siswa.csv", mime="text/csv")
